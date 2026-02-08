@@ -53,8 +53,18 @@ if {![regexp {:\s*bgp\[[0-9]+\]:\s*%ROUTING-BGP-5-ADJCHANGE_DETAIL} $msg]} {
     exit 0
 }
 
-# Only v4 unicast events
-if {![regexp {AFI/SAFI:\s*1/1} $msg]} { exit 0 }
+# Track AFI/SAFI; allow v4/v6 unicast
+set afi_safi "UNKNOWN"
+if {[regexp {AFI/SAFI:\s*([0-9]+/[0-9]+)} $msg -> afi_safi]} {
+    # accept 1/1 (v4) and 2/1 (v6)
+    if {$afi_safi ne "1/1" && $afi_safi ne "2/1"} {
+        log_info "$TAG: IGNORE afi_safi=$afi_safi msg='$msg'"
+        exit 0
+    }
+} else {
+    log_info "$TAG: IGNORE no_afi_safi msg='$msg'"
+    exit 0
+}
 
 # Only for this remote AS
 if {![regexp "\\(AS:\\s*${REMOTE_AS}\\)" $msg]} { exit 0 }
@@ -62,11 +72,16 @@ if {![regexp "\\(AS:\\s*${REMOTE_AS}\\)" $msg]} { exit 0 }
 # Parse neighbor + Up/Down from syslog (for printing)
 set ip ""
 set st ""
-if {![regexp -nocase {neighbor\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+(Up|Down)} $msg -> ip st]} {
+if {![regexp -nocase {neighbor\s+([0-9a-fA-F:\.]+)\s+(Up|Down)} $msg -> ip st]} {
     log_err "$TAG: parse_failed msg='$msg'"
     exit 0
 }
 set st [string toupper $st]
+
+set is_v4 0
+if {[regexp {^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$} $ip]} {
+    set is_v4 1
+}
 
 # ----------------------------
 # CLI open/close
@@ -159,7 +174,13 @@ proc snapshot_bgp_summary {nbr} {
 # Main
 # ----------------------------
 # Log the triggering event first (so you know it matched)
-log_warn "$TAG: TRIGGER syslog_event ip=$ip state=$st"
+log_warn "$TAG: TRIGGER syslog_event ip=$ip state=$st afi_safi=$afi_safi"
+
+# Only v4 neighbors can be checked via "show bgp summary"
+if {!$is_v4} {
+    log_info "$TAG: SKIP non_v4 neighbor=$ip afi_safi=$afi_safi"
+    exit 0
+}
 
 # Only act on DOWN events; summary check is scoped to that neighbor
 if {$st ne "DOWN"} {
