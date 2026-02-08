@@ -89,76 +89,47 @@ proc close_cli {} {
 
 # ----------------------------
 # Snapshot using:
-#   show bgp neighbors | include remote AS <REMOTE_AS>
-# Then query each neighbor for its BGP state.
-# UP definition: BGP state starts with "Established"
-# DOWN definition: any other state or no state returned
+#   show bgp summary | include <REMOTE_AS>
+# UP definition: "State/PfxRcd" column is numeric (Established)
+# DOWN definition: "State/PfxRcd" column is non-numeric (Idle/Active/etc)
 # ----------------------------
-proc list_remote_as_neighbors {} {
+proc snapshot_bgp_summary {} {
     global cli1
     global REMOTE_AS
 
-    set cmd "show bgp neighbors | include remote AS ${REMOTE_AS}"
+    set cmd "show bgp summary | include ${REMOTE_AS}"
     if [catch {cli_exec $cli1(fd) $cmd} out] {
         return -code error "cli_exec_failed"
     }
 
-    set ips {}
-    foreach line [split $out "\n"] {
-        set line [string trim $line]
-        if {$line eq ""} { continue }
-
-        # Example:
-        # BGP neighbor is 101.52.0.1, remote AS 130537, external link
-        if {[regexp -nocase {neighbor\s+is\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+),\s*remote\s+AS\s+([0-9]+)} $line -> nbr asn]} {
-            if {$asn == $REMOTE_AS} {
-                lappend ips $nbr
-            }
-        }
-    }
-
-    if {[llength $ips] > 1} {
-        set ips [lsort -unique $ips]
-    }
-    return $ips
-}
-
-proc neighbor_state {nbr} {
-    global cli1
-
-    set cmd "show bgp neighbors ${nbr} | include BGP state"
-    if [catch {cli_exec $cli1(fd) $cmd} out] {
-        return -code error "cli_exec_failed"
-    }
-
-    foreach line [split $out "\n"] {
-        set line [string trim $line]
-        if {$line eq ""} { continue }
-        if {[regexp -nocase {BGP state\s*=\s*([^,]+)} $line -> state]} {
-            return [string trim $state]
-        }
-    }
-
-    return "UNKNOWN"
-}
-
-proc snapshot_bgp_states {} {
     set tracked 0
     set up 0
     set down 0
     set up_ips ""
     set down_ips ""
 
-    set neighbors [list_remote_as_neighbors]
-    set tracked [llength $neighbors]
+    foreach line [split $out "\n"] {
+        set line [string trim $line]
+        if {$line eq ""} { continue }
 
-    foreach nbr $neighbors {
-        set state ""
-        if {[catch {set state [neighbor_state $nbr]} err]} {
-            set state "UNKNOWN"
+        # Summary lines start with neighbor IPv4
+        if {![regexp {^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+} $line -> nbr]} {
+            continue
         }
 
-        if {[regexp -nocase {^Established} $state]} {
+        # Must contain the remote AS field
+        if {![regexp "\\s${REMOTE_AS}\\s" $line]} {
+            continue
+        }
+
+        set fields [split $line]
+        if {[llength $fields] < 3} { continue }
+
+        # State/PfxRcd is the last column (numeric if established)
+        set last [lindex $fields end]
+        incr tracked
+
+        if {[regexp {^[0-9]+$} $last]} {
             incr up
             append up_ips "$nbr "
         } else {
@@ -185,7 +156,7 @@ if {![open_cli]} {
 }
 
 set snap ""
-if {[catch {set snap [snapshot_bgp_states]} err]} {
+if {[catch {set snap [snapshot_bgp_summary]} err]} {
     log_err "$TAG: snapshot_failed ($err)"
     close_cli
     exit 0
