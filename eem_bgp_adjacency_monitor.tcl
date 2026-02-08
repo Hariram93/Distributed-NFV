@@ -90,30 +90,35 @@ proc close_cli {} {
 # ----------------------------
 # Snapshot using:
 #   show bgp summary | include <REMOTE_AS>
+# Only evaluate the neighbor reported DOWN by syslog.
 # UP definition: "State/PfxRcd" column is numeric (Established)
 # DOWN definition: "State/PfxRcd" column is non-numeric (Idle/Active/etc)
 # ----------------------------
-proc snapshot_bgp_summary {} {
+proc snapshot_bgp_summary {nbr} {
     global cli1
     global REMOTE_AS
+    global TAG
 
     set cmd "show bgp summary | include ${REMOTE_AS}"
     if [catch {cli_exec $cli1(fd) $cmd} out] {
         return -code error "cli_exec_failed"
     }
 
-    set tracked 0
+    set tracked 1
     set up 0
     set down 0
     set up_ips ""
     set down_ips ""
+    set found 0
+
+    set nbr_re [string map { "." "\\." } $nbr]
 
     foreach line [split $out "\n"] {
         set line [string trim $line]
         if {$line eq ""} { continue }
 
-        # Summary lines start with neighbor IPv4
-        if {![regexp {^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\s+} $line -> nbr]} {
+        # Match the specific neighbor line
+        if {![regexp "^${nbr_re}\\s+" $line]} {
             continue
         }
 
@@ -125,10 +130,9 @@ proc snapshot_bgp_summary {} {
         set fields [split $line]
         if {[llength $fields] < 3} { continue }
 
+        set found 1
         # State/PfxRcd is the last column (numeric if established)
         set last [lindex $fields end]
-        incr tracked
-
         if {[regexp {^[0-9]+$} $last]} {
             incr up
             append up_ips "$nbr "
@@ -136,6 +140,13 @@ proc snapshot_bgp_summary {} {
             incr down
             append down_ips "$nbr "
         }
+        break
+    }
+
+    if {!$found} {
+        log_warn "$TAG: SUMMARY no entry for neighbor=$nbr; treating as DOWN"
+        incr down
+        append down_ips "$nbr "
     }
 
     set up_ips [string trim $up_ips]
@@ -150,13 +161,19 @@ proc snapshot_bgp_summary {} {
 # Log the triggering event first (so you know it matched)
 log_warn "$TAG: TRIGGER syslog_event ip=$ip state=$st"
 
+# Only act on DOWN events; summary check is scoped to that neighbor
+if {$st ne "DOWN"} {
+    log_info "$TAG: IGNORE state=$st (only DOWN triggers summary check)"
+    exit 0
+}
+
 if {![open_cli]} {
     log_err "$TAG: CLI open failed"
     exit 0
 }
 
 set snap ""
-if {[catch {set snap [snapshot_bgp_summary]} err]} {
+if {[catch {set snap [snapshot_bgp_summary $ip]} err]} {
     log_err "$TAG: snapshot_failed ($err)"
     close_cli
     exit 0
